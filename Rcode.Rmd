@@ -1,0 +1,455 @@
+---
+title: "Pooled Estimates for prec & mental health"
+author: "ANA, CORAL and SUJUNG"
+date: "6/4/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### MAIN ANALYSIS
+In this code, we estimate the exposure-response function for each location using the two-stage approach.
+We restrict the analysis to main eight cities (Zurich, Geneva, Lausanne, St.Gallen, Luzern, Lugano, Bern and Basel)
+
+#### 1. LOAD LIBRARIES 
+```{r message=FALSE, warning=FALSE}
+rm(list = ls())
+library(dlnm) ; library(mixmeta) ; library(splines) ; library(tsModel)
+library(mgcv) ; library(lubridate); library(gnm); library(dplyr)
+```
+
+#### 2. LOAD THE DATASET (SELECT SUMMER MONTHS) AND SET WORKING DIRECTORIES
+```{r}
+dta <- readRDS("YOUR_WORKING_DIRECTORY_PATH/data.rds")
+```
+
+#### 3. MAIN ANALYSIS
+### 1) PP.2 (>= 1mm over consecutive 2 days)
+```{r}
+listvariables<- c("all", "a064y", "a65plusy", "sex1", "sex2", "dF00F09", "dF10F19", "dF20F29", "dF30F39", "dF40F59", "dF60F69", "dF70F79", "dF80F98") #listvariables refer to your outcomes# 
+
+
+listcities<-names(dta) 
+
+##RESTORE THE RESULTS##
+res_rr_pp.2 <- matrix(NA, nrow=length(dta), ncol=13) ##ncol= number of variables in listvariables##
+
+cp_list <- list()
+coefall <- matrix(NA, nrow=length(listcities), ncol=1)
+vcovall <- list()
+
+
+# LOOP ACROSS VARIABLES
+
+for (j in seq(length(listvariables))){
+  varname <- listvariables [j] # each outcome is named varname#
+  
+  # LOOP ACROSS CITIES
+ 
+  for (i in seq(length(dta))){
+    data <- subset(dta[[i]], Date > "2008-12-31" & Date < "2020-01-01") 
+    # list should be your data set containing everything: date, daily prec, pp, pep, and all diagnosis...#
+
+    # PREPARE YOUR TIME VARIABLES AND STRATUM
+    data$month<- as.factor(months(data$Date))
+    data$year <- as.factor(format(data$Date, format="%Y"))
+    data$dow <- as.factor(weekdays(data$Date))
+    data$stratum <- as.factor(data$year:data$month)
+    
+    # TO CHECK THAT THE N COLUM CORRESPONDS TO THE VARNAME
+    idcol <- which(names(data)==varname)
+    
+    # ELIMINATE EMPTY STRATA (FOR CORRECT COMPUTATION OF CI IN gnm)
+    ind <- tapply(data[,idcol], data$stratum, sum)[data$stratum]
+
+    
+    #CROSSBASIS
+    cbpp.2 <- crossbasis(data$pp.2, lag=3, argvar=list(fun="integer"), arglag=list(fun="strata", breaks=1))
+    cbtemp <- crossbasis(data$TabsD, lag=3, argvar=list(fun="lin"), arglag=list(fun="integer"))
+    
+    # MODEL
+    model <- gnm(as.formula(paste0(varname, " ~ cbpp.2 + cbtemp + dow")), eliminate=stratum,
+                family=quasipoisson(), data=data, na.action="na.exclude",
+                subset=ind>0)
+          
+    # STORE RESULTS
+    
+    cp_list[[i]] <- crossreduce(cbpp.2, model, cen=0, at=1)
+    
+    
+    coefall[i,] <-  cp_list[[i]]$coefficients
+    vcovall[[i]] <-  cp_list[[i]]$vcov
+    
+    cp <- crosspred(cbpp.2, model, cen=0, at=1)
+    res_rr_pp.2[i,j] <- paste0((format(round(cp$allRRfit,3), nsmall = 3)), " [", 
+                          (format(round(cp$allRRlow,3), nsmall = 3))," - ",
+                          (format(round(cp$allRRhigh,3), nsmall = 3)) ,"]")
+    
+  }
+  
+  assign(paste("cp_list",varname,sep = "_"), cp_list) 
+  assign(paste("coefall", varname,sep = "_"), coefall) 
+  assign(paste("vcovall", varname,sep = "_"), vcovall) 
+  
+}  
+
+rownames(res_rr_pp.2) <- listcities
+colnames(res_rr_pp.2) <- listvariables
+```
+
+### 1-1) PP.2 - POOLED ESTIMATES
+```{r}
+###### POOLED ESTIMATES 
+avgtmean <- sapply(dta,function(x) mean(x$TabsD,na.rm=T))
+rangetmean <- sapply(dta,function(x) IQR(x$TabsD,na.rm=T)) ## IQR!!
+
+pool_res_pp.2 <- matrix(NA, nrow=length(listvariables), ncol=1)
+cp_pool_list <- list()
+
+pp.2_all <- seq(0,1)
+pp.2_pred <- onebasis(pp.2_all, fun="integer")
+
+for (j in seq(length(listvariables))){
+  coefmeta <- get(paste("coefall", listvariables[[j]],sep = "_"))
+  vcovmeta <- get(paste("vcovall", listvariables[[j]],sep = "_"))
+  
+  meta_MH <- mixmeta(coefmeta ~ avgtmean + rangetmean, vcovmeta)
+  datanew <- data.frame(avgtmean=mean(avgtmean),rangetmean=mean(rangetmean))
+
+  pred <- predict(meta_MH, datanew, vcov=T)
+
+  cp_pool_list[[j]] <- crosspred(pp.2_pred, coef=pred[1], vcov=as.matrix(pred[2]), model.link="log", cen=0, by=1, at=1)
+  
+  pool_res_pp.2[j,] <- paste0(format(round(cp_pool_list[[j]]$allRRfit,3), nsmall=3), " [", 
+                      format(round(cp_pool_list[[j]]$allRRlow,3), nsmall=3)," - ",
+                      format(round(cp_pool_list[[j]]$allRRhigh,3), nsmall=3) ,"]")
+
+} 
+rownames(pool_res_pp.2) <- listvariables
+```
+
+
+### 2) PP.3 (>= 1mm over consecutive 3 days)
+```{r}
+listvariables<- c("all", "a064y", "a65plusy", "sex1", "sex2", "dF00F09", "dF10F19", "dF20F29", "dF30F39", "dF40F59", "dF60F69", "dF70F79", "dF80F98") #listvariables refer to your outcomes# 
+
+
+listcities<-names(dta) 
+
+##RESTORE THE RESULTS##
+res_rr_pp.3 <- matrix(NA, nrow=length(dta), ncol=13) ##ncol= number of variables in listvariables##
+
+cp_list <- list()
+coefall <- matrix(NA, nrow=length(listcities), ncol=1)
+vcovall <- list()
+
+
+# LOOP ACROSS VARIABLES
+
+for (j in seq(length(listvariables))){
+  varname <- listvariables [j] # each outcome is named varname#
+  
+  # LOOP ACROSS CITIES
+ 
+  for (i in seq(length(dta))){
+    data <- subset(dta[[i]], Date > "2008-12-31" & Date < "2020-01-01") 
+    # list should be your data set containing everything: date, daily prec, pp, pep, and all diagnosis...#
+
+    # PREPARE YOUR TIME VARIABLES AND STRATUM
+    data$month<- as.factor(months(data$Date))
+    data$year <- as.factor(format(data$Date, format="%Y"))
+    data$dow <- as.factor(weekdays(data$Date))
+    data$stratum <- as.factor(data$year:data$month)
+    
+    # TO CHECK THAT THE N COLUM CORRESPONDS TO THE VARNAME
+    idcol <- which(names(data)==varname)
+    
+    # ELIMINATE EMPTY STRATA (FOR CORRECT COMPUTATION OF CI IN gnm)
+    ind <- tapply(data[,idcol], data$stratum, sum)[data$stratum]
+
+    
+    #CROSSBASIS
+    cbpp.3 <- crossbasis(data$pp.3, lag=3, argvar=list(fun="integer"), arglag=list(fun="strata", breaks=1))
+    cbtemp <- crossbasis(data$TabsD, lag=3, argvar=list(fun="lin"), arglag=list(fun="integer"))
+    
+    # MODEL
+    model <- gnm(as.formula(paste0(varname, " ~ cbpp.3 + cbtemp + dow")), eliminate=stratum,
+                family=quasipoisson(), data=data, na.action="na.exclude",
+                subset=ind>0)
+          
+    # STORE RESULTS
+    
+    cp_list[[i]] <- crossreduce(cbpp.3, model, cen=0, at=1)
+    
+    
+    coefall[i,] <-  cp_list[[i]]$coefficients
+    vcovall[[i]] <-  cp_list[[i]]$vcov
+    
+    cp <- crosspred(cbpp.3, model, cen=0, at=1)
+    res_rr_pp.3[i,j] <- paste0((format(round(cp$allRRfit,3), nsmall = 3)), " [", 
+                          (format(round(cp$allRRlow,3), nsmall = 3))," - ",
+                          (format(round(cp$allRRhigh,3), nsmall = 3)) ,"]")
+    
+  }
+  
+  assign(paste("cp_list",varname,sep = "_"), cp_list) 
+  assign(paste("coefall", varname,sep = "_"), coefall) 
+  assign(paste("vcovall", varname,sep = "_"), vcovall) 
+  
+}  
+
+
+
+rownames(res_rr_pp.3) <- listcities
+colnames(res_rr_pp.3) <- listvariables
+```
+
+### 2-1) PP.3 - POOLED ESTIMATES
+```{r}
+###### POOLED ESTIMATES 
+avgtmean <- sapply(dta,function(x) mean(x$TabsD,na.rm=T))
+rangetmean <- sapply(dta,function(x) IQR(x$TabsD,na.rm=T)) ## IQR!!
+
+pool_res_pp.3 <- matrix(NA, nrow=length(listvariables), ncol=1)
+cp_pool_list <- list()
+
+pp.3_all <- seq(0,1)
+pp.3_pred <- onebasis(pp.3_all, fun="integer")
+
+for (j in seq(length(listvariables))){
+  coefmeta <- get(paste("coefall", listvariables[[j]],sep = "_"))
+  vcovmeta <- get(paste("vcovall", listvariables[[j]],sep = "_"))
+  
+  meta_MH <- mixmeta(coefmeta ~ avgtmean + rangetmean, vcovmeta)
+  datanew <- data.frame(avgtmean=mean(avgtmean),rangetmean=mean(rangetmean))
+
+  pred <- predict(meta_MH, datanew, vcov=T)
+
+  cp_pool_list[[j]] <- crosspred(pp.3_pred, coef=pred[1], vcov=as.matrix(pred[2]), model.link="log", cen=0, by=1, at=1)
+  
+  pool_res_pp.3[j,] <- paste0(format(round(cp_pool_list[[j]]$allRRfit,3), nsmall=3), " [", 
+                      format(round(cp_pool_list[[j]]$allRRlow,3), nsmall=3)," - ",
+                      format(round(cp_pool_list[[j]]$allRRhigh,3), nsmall=3) ,"]")
+
+} 
+rownames(pool_res_pp.3) <- listvariables
+```
+
+
+### 3) PP.4 (>= 1mm over consecutive 4 days)
+```{r}
+listvariables<- c("all", "a064y", "a65plusy", "sex1", "sex2", "dF00F09", "dF10F19", "dF20F29", "dF30F39", "dF40F59", "dF60F69", "dF70F79", "dF80F98") #listvariables refer to your outcomes# 
+
+
+listcities<-names(dta) 
+
+##RESTORE THE RESULTS##
+res_rr_pp.4 <- matrix(NA, nrow=length(dta), ncol=13) ##ncol= number of variables in listvariables##
+
+cp_list <- list()
+coefall <- matrix(NA, nrow=length(listcities), ncol=1)
+vcovall <- list()
+
+
+# LOOP ACROSS VARIABLES
+
+for (j in seq(length(listvariables))){
+  varname <- listvariables [j] # each outcome is named varname#
+  
+  # LOOP ACROSS CITIES
+ 
+  for (i in seq(length(dta))){
+    data <- subset(dta[[i]], Date > "2008-12-31" & Date < "2020-01-01") 
+    # list should be your data set containing everything: date, daily prec, pp, pep, and all diagnosis...#
+
+    # PREPARE YOUR TIME VARIABLES AND STRATUM
+    data$month<- as.factor(months(data$Date))
+    data$year <- as.factor(format(data$Date, format="%Y"))
+    data$dow <- as.factor(weekdays(data$Date))
+    data$stratum <- as.factor(data$year:data$month)
+    
+    # TO CHECK THAT THE N COLUM CORRESPONDS TO THE VARNAME
+    idcol <- which(names(data)==varname)
+    
+    # ELIMINATE EMPTY STRATA (FOR CORRECT COMPUTATION OF CI IN gnm)
+    ind <- tapply(data[,idcol], data$stratum, sum)[data$stratum]
+
+    
+    #CROSSBASIS
+    cbpp.4 <- crossbasis(data$pp.4, lag=3, argvar=list(fun="integer"), arglag=list(fun="strata", breaks=1))
+    cbtemp <- crossbasis(data$TabsD, lag=3, argvar=list(fun="lin"), arglag=list(fun="integer"))
+    
+    # MODEL
+    model <- gnm(as.formula(paste0(varname, " ~ cbpp.4 + cbtemp + dow")), eliminate=stratum,
+                family=quasipoisson(), data=data, na.action="na.exclude",
+                subset=ind>0)
+          
+    # STORE RESULTS
+    
+    cp_list[[i]] <- crossreduce(cbpp.4, model, cen=0, at=1)
+    
+    
+    coefall[i,] <-  cp_list[[i]]$coefficients
+    vcovall[[i]] <-  cp_list[[i]]$vcov
+    
+    cp <- crosspred(cbpp.4, model, cen=0, at=1)
+    res_rr_pp.4[i,j] <- paste0((format(round(cp$allRRfit,3), nsmall = 3)), " [", 
+                          (format(round(cp$allRRlow,3), nsmall = 3))," - ",
+                          (format(round(cp$allRRhigh,3), nsmall = 3)) ,"]")
+    
+  }
+  
+  assign(paste("cp_list",varname,sep = "_"), cp_list) 
+  assign(paste("coefall", varname,sep = "_"), coefall) 
+  assign(paste("vcovall", varname,sep = "_"), vcovall) 
+  
+}  
+
+
+
+rownames(res_rr_pp.4) <- listcities
+colnames(res_rr_pp.4) <- listvariables
+```
+
+### 3-1) PP.4 - POOLED ESTIMATES
+```{r}
+###### POOLED ESTIMATES 
+avgtmean <- sapply(dta,function(x) mean(x$TabsD,na.rm=T))
+rangetmean <- sapply(dta,function(x) IQR(x$TabsD,na.rm=T)) ## IQR!!
+
+pool_res_pp.4 <- matrix(NA, nrow=length(listvariables), ncol=1)
+cp_pool_list <- list()
+
+pp.4_all <- seq(0,1)
+pp.4_pred <- onebasis(pp.4_all, fun="integer")
+
+for (j in seq(length(listvariables))){
+  coefmeta <- get(paste("coefall", listvariables[[j]],sep = "_"))
+  vcovmeta <- get(paste("vcovall", listvariables[[j]],sep = "_"))
+  
+  meta_MH <- mixmeta(coefmeta ~ avgtmean + rangetmean, vcovmeta)
+  datanew <- data.frame(avgtmean=mean(avgtmean),rangetmean=mean(rangetmean))
+
+  pred <- predict(meta_MH, datanew, vcov=T)
+
+  cp_pool_list[[j]] <- crosspred(pp.4_pred, coef=pred[1], vcov=as.matrix(pred[2]), model.link="log", cen=0, by=1, at=1)
+  
+  pool_res_pp.4[j,] <- paste0(format(round(cp_pool_list[[j]]$allRRfit,3), nsmall=3), " [", 
+                      format(round(cp_pool_list[[j]]$allRRlow,3), nsmall=3)," - ",
+                      format(round(cp_pool_list[[j]]$allRRhigh,3), nsmall=3) ,"]")
+
+} 
+rownames(pool_res_pp.4) <- listvariables
+```
+
+
+### 4) PEP90.2 (>= 90th percentile over consecutive 2 days)
+```{r}
+
+listvariables<- c("all", "a064y", "a65plusy", "sex1", "sex2", "dF00F09", "dF10F19", "dF20F29", "dF30F39", "dF40F59", "dF60F69", "dF70F79", "dF80F98") #listvariables refer to your outcomes# 
+
+
+listcities<-names(dta) 
+
+##RESTORE THE RESULTS##
+res_rr_pep90.2_lag3 <- matrix(NA, nrow=length(dta), ncol=13) ##ncol= number of variables in listvariables##
+
+cp_list <- list()
+coefall <- matrix(NA, nrow=length(listcities), ncol=1)
+vcovall <- list()
+
+
+# LOOP ACROSS VARIABLES
+
+for (j in seq(length(listvariables))){
+  varname <- listvariables [j] # each outcome is named varname#
+  
+  # LOOP ACROSS CITIES
+ 
+  for (i in seq(length(dta))){
+    data <- subset(dta[[i]], Date > "2008-12-31" & Date < "2020-01-01") 
+    # list should be your data set containing everything: date, daily prec, pp, pep, and all diagnosis...#
+
+    # PREPARE YOUR TIME VARIABLES AND STRATUM
+    data$month<- as.factor(months(data$Date))
+    data$year <- as.factor(format(data$Date, format="%Y"))
+    data$dow <- as.factor(weekdays(data$Date))
+    data$stratum <- as.factor(data$year:data$month)
+    
+    # TO CHECK THAT THE N COLUM CORRESPONDS TO THE VARNAME
+    idcol <- which(names(data)==varname)
+    
+    # ELIMINATE EMPTY STRATA (FOR CORRECT COMPUTATION OF CI IN gnm)
+    ind <- tapply(data[,idcol], data$stratum, sum)[data$stratum]
+
+    
+    #CROSSBASIS
+    cbpep90.2 <- crossbasis(data$pep90.2, lag=3, argvar=list(fun="integer"), arglag=list(fun="strata", breaks=1))
+    cbtemp <- crossbasis(data$TabsD, lag=3, argvar=list(fun="lin"), arglag=list(fun="integer"))
+
+    
+    # MODEL
+    model <- gnm(as.formula(paste0(varname, " ~ cbpep90.2 + cbtemp + dow")), eliminate=stratum,
+                family=quasipoisson(), data=data, na.action="na.exclude",
+                subset=ind>0)
+          
+    # STORE RESULTS
+    cp_list[[i]] <- crossreduce(cbpep90.2, model, cen=0, at=1)
+    
+    
+    coefall[i,] <-  cp_list[[i]]$coefficients
+    vcovall[[i]] <-  cp_list[[i]]$vcov
+    
+    cp <- crosspred(cbpep90.2, model, cen=0, at=1)
+    res_rr_pep90.2_lag3[i,j] <- paste0((format(round(cp$allRRfit,3), nsmall = 3)), " [", 
+                          (format(round(cp$allRRlow,3), nsmall = 3))," - ",
+                          (format(round(cp$allRRhigh,3), nsmall = 3)) ,"]")
+    
+  }
+  
+  assign(paste("cp_list",varname,sep = "_"), cp_list) 
+  assign(paste("coefall", varname,sep = "_"), coefall) 
+  assign(paste("vcovall", varname,sep = "_"), vcovall) 
+  
+}  
+
+
+rownames(res_rr_pep90.2_lag3) <- listcities
+colnames(res_rr_pep90.2_lag3) <- listvariables
+```
+
+### 4-1) PEP90.2 - POOLED ESTIMATES
+```{r}
+###### POOLED ESTIMATES 
+avgtmean <- sapply(dta,function(x) mean(x$TabsD,na.rm=T))
+rangetmean <- sapply(dta,function(x) IQR(x$TabsD,na.rm=T)) ## IQR!!
+
+pool_res_pep90.2 <- matrix(NA, nrow=length(listvariables), ncol=1)
+cp_pool_list <- list()
+
+pep90.2_all <- seq(0,1)
+pep90.2_pred <- onebasis(pep90.2_all, fun="integer")
+
+for (j in seq(length(listvariables))){
+  coefmeta <- get(paste("coefall", listvariables[[j]],sep = "_"))
+  vcovmeta <- get(paste("vcovall", listvariables[[j]],sep = "_"))
+  
+  meta_MH <- mixmeta(coefmeta ~ avgtmean + rangetmean, vcovmeta)
+  datanew <- data.frame(avgtmean=mean(avgtmean),rangetmean=mean(rangetmean))
+
+  pred <- predict(meta_MH, datanew, vcov=T)
+
+  cp_pool_list[[j]] <- crosspred(pep90.2_pred, coef=pred[1], vcov=as.matrix(pred[2]), model.link="log", cen=0, by=1, at=1)
+  
+  pool_res_pep90.2[j,] <- paste0(format(round(cp_pool_list[[j]]$allRRfit,3), nsmall=3), " [", 
+                      format(round(cp_pool_list[[j]]$allRRlow,3), nsmall=3)," - ",
+                      format(round(cp_pool_list[[j]]$allRRhigh,3), nsmall=3),"]")
+
+} 
+rownames(pool_res_pep90.2) <- listvariables
+```
+
